@@ -1,0 +1,32 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.duydio'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'io.vertx:vertx-core:4.5.1'
+    implementation 'io.vertx:vertx-web:4.5.1'
+    implementation 'io.vertx:vertx-web-api-contract:4.5.1'
+    implementation 'io.vertx:vertx-redis-client:4.5.1'
+
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+
+
+
+}
+
+test {
+    useJUnitPlatform()
+}
+
+application {
+    mainClass = 'org.duydio.MainVerticle'
+}
