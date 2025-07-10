@@ -5,11 +5,9 @@ import io.vertx.core.impl.logging.Logger;
 import io.vertx.core.impl.logging.LoggerFactory;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
-import io.vertx.redis.client.Redis;
-import io.vertx.redis.client.RedisAPI;
-import io.vertx.redis.client.RedisOptions;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 import java.util.UUID;
@@ -26,24 +24,12 @@ public class MainVerticle extends AbstractVerticle {
 
     @Override
     public void start(Promise<Void> startPromise) {
-        Router router = Router.router(vertx);
-
         logger.info(String.format(
-                "[start] Thread: %s - eventLoopPoolSize=%d, workerPoolSize=%d",
-                Thread.currentThread().getName(),
-                options.getEventLoopPoolSize(),
-                options.getWorkerPoolSize()
+                "[start] Thread: %s",
+                Thread.currentThread().getName()
         ));
 
-        System.out.println("Event loop pool size: " + options.getEventLoopPoolSize());
-        System.out.println("Worker pool size: " + options.getWorkerPoolSize());
-
-        RedisOptions options = new RedisOptions()
-                .setConnectionString("redis://127.0.0.1:6379");
-
-        Redis client = Redis.createClient(vertx, options);
-
-        RedisAPI redis = RedisAPI.api(client);
+        Router router = Router.router(vertx);
 
         router.get("/api/hello").handler(ctx -> {
             ctx.response()
@@ -53,58 +39,109 @@ public class MainVerticle extends AbstractVerticle {
 
         router.post("/api/set").handler(ctx -> {
             ctx.request().bodyHandler(buffer -> {
-                // parse JSON
                 UUID uuid = UUID.randomUUID();
-                long r = random()* 1000L;
+                long r = random() * 1000L;
+
                 logger.info(String.format(
                         logFormat,
                         LocalDateTime.now(),
                         currentThread(),
-                        "start " + uuid + " " + r
+                        "start " + uuid + " delay=" + r
                 ));
 
                 JsonObject body = buffer.toJsonObject();
-                String key = body.getString("key");
-                String value = body.getString("value");
 
                 vertx.setTimer(r, id -> {
-                    set(redis, key, value, uuid).onSuccess(result -> {
-                        ctx.response()
-                                .putHeader("content-type", "application/json")
-                                .end(new JsonObject().put("status", "ok").toBuffer());
-                    }).onFailure(cause -> {
-                        ctx.response()
-                                .setStatusCode(500)
-                                .end(new JsonObject().put("error", cause.getMessage()).toBuffer());
+                    vertx.eventBus().request("redis.set", body, reply -> {
+                        if (reply.succeeded()) {
+                            logger.info(String.format(
+                                    logFormat,
+                                    LocalDateTime.now(),
+                                    currentThread(),
+                                    "SET OK " + uuid
+                            ));
+                            ctx.response()
+                                    .putHeader("content-type", "application/json")
+                                    .end(reply.result().body().toString());
+                        } else {
+                            logger.error(String.format(
+                                    logFormat,
+                                    LocalDateTime.now(),
+                                    currentThread(),
+                                    "SET ERROR " + uuid
+                            ), reply.cause());
+                            ctx.response()
+                                    .setStatusCode(503)
+                                    .end(new JsonObject()
+                                            .put("error", reply.cause().getMessage())
+                                            .toBuffer());
+                        }
                     });
                 });
             });
         });
 
+        router.post("/api/many").handler(ctx -> {
+            List<Future> futures = new ArrayList<>();
+
+            for (int i = 0; i < 20; i++) {
+                UUID uuid = UUID.randomUUID();
+                JsonObject payload = new JsonObject()
+                        .put("key", "key-" + uuid)
+                        .put("value", "value-" + uuid);
+
+                Promise<Void> promise = Promise.promise();
+                futures.add(promise.future());
+
+                long r = random() * 1000L;
+                vertx.setTimer(r, id -> {
+                    vertx.eventBus().request("redis.set", payload, reply -> {
+                        if (reply.succeeded()) {
+                            logger.info(String.format(
+                                    logFormat,
+                                    LocalDateTime.now(),
+                                    currentThread(),
+                                    "SET OK " + uuid
+                            ));
+                            promise.complete(); // mark done
+                        } else {
+                            logger.error(String.format(
+                                    logFormat,
+                                    LocalDateTime.now(),
+                                    currentThread(),
+                                    "SET ERROR " + uuid
+                            ), reply.cause());
+                            promise.fail(reply.cause());
+                        }
+                    });
+                });
+            }
+
+            // Combine all futures
+            CompositeFuture.all(futures).onComplete(ar -> {
+                if (ar.succeeded()) {
+                    ctx.response()
+                            .putHeader("content-type", "application/json")
+                            .end(new JsonObject().put("status", "All 20 redis sets completed").toBuffer());
+                } else {
+                    ctx.response()
+                            .setStatusCode(500)
+                            .end(new JsonObject().put("error", ar.cause().getMessage()).toBuffer());
+                }
+            });
+        });
+
+
         vertx.createHttpServer()
                 .requestHandler(router)
                 .listen(8888, http -> {
                     if (http.succeeded()) {
+                        logger.info("HTTP server started on port 8888");
                         startPromise.complete();
-                        System.out.println("HTTP server started on port 8888");
                     } else {
                         startPromise.fail(http.cause());
                     }
                 });
-    }
-
-    private Future<Boolean> set(RedisAPI redis, String key, String value, UUID id) {
-        Promise<Boolean> promise = Promise.promise();
-        redis.set(List.of(key, value), res -> {
-            if (res.succeeded()) {
-                logger.info(String.format(logFormat, LocalDateTime.now(), currentThread(), "SET OK " + id));
-                promise.complete(true);
-            } else {
-                logger.error(String.format(logFormat, LocalDateTime.now(), currentThread(), "SET ERROR " + id), res.cause());
-                promise.complete(false);
-            }
-        });
-        return promise.future();
     }
 
     private String currentThread() {
@@ -112,18 +149,36 @@ public class MainVerticle extends AbstractVerticle {
     }
 
     private int random() {
-        Random random = new Random();
-        return random.nextInt(5) + 1;
+        return new Random().nextInt(5) + 1;
+    }
+
+    @Override
+    public void stop() {
+        logger.info("MainVerticle is stopping...");
     }
 
 
     public static void main(String[] args) {
-
         VertxOptions options = new VertxOptions()
-                .setEventLoopPoolSize(4)
+                .setEventLoopPoolSize(2)
                 .setWorkerPoolSize(50);
+        Vertx vertx = Vertx.vertx(options);
 
-        Vertx.vertx(options).deployVerticle(new MainVerticle(options));
+        vertx.deployVerticle("org.duydio.RedisVerticle", new DeploymentOptions().setInstances(4), res -> {
+            if (res.succeeded()) {
+                System.out.println("Deployed 4 instances of RedisVerticle");
+
+                vertx.deployVerticle(new MainVerticle(options), mainRes -> {
+                    if (mainRes.succeeded()) {
+                        System.out.println("MainVerticle started");
+                    } else {
+                        mainRes.cause().printStackTrace();
+                    }
+                });
+            } else {
+                res.cause().printStackTrace();
+            }
+        });
     }
 
 }
